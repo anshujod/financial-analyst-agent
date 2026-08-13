@@ -3,3 +3,5 @@
 *.jsonl
 data/*.pdf
 __pycache__/
+adapter/
+*.zip
