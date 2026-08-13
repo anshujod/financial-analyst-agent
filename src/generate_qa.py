@@ -7,8 +7,11 @@ ROOT = Path(__file__).resolve().parent.parent
 MODEL = "openai/gpt-4o-mini"
 
 QA_GEN_PROMPT = """You are generating fine-tuning data for a financial analyst assistant. Given
-the text of one section of a 10-K filing, write 3-5 question/answer pairs that a financial
-analyst studying this filing might ask and answer.
+the text of one section of a 10-K filing, write {n_pairs} question/answer pairs that a financial
+analyst studying this filing might ask and answer. Cover a genuinely diverse range of angles
+(figures, drivers, risks, definitions, comparisons) rather than rephrasing the same fact —
+if the section doesn't support that many distinct, non-redundant questions, return fewer rather
+than padding with near-duplicates.
 
 Write answers in a precise financial-analyst voice:
 - Cite concrete figures and named items exactly as they appear in the text (dollar amounts,
@@ -30,7 +33,7 @@ A: As reported in Item 7, the company held $25.98 billion in cash, cash equivale
 marketable securities as of fiscal year-end, which management states is sufficient to meet
 liquidity requirements for at least the next twelve months.
 
-Now generate 3-5 Q&A pairs for this section.
+Now generate up to {n_pairs} Q&A pairs for this section.
 
 Section title: {title}
 
@@ -42,9 +45,25 @@ Respond ONLY with JSON in this exact format:
 """
 
 
+def target_pair_count(text: str) -> int:
+    """Scale the requested pair count with section length so short/boilerplate sections
+    (e.g. a 1-page "Item 6. [Reserved]") aren't forced into padding with near-duplicates,
+    while long, information-dense sections (Risk Factors, Item 15) can yield more."""
+    length = len(text)
+    if length < 2000:
+        return 4
+    if length < 6000:
+        return 7
+    if length < 20000:
+        return 10
+    return 16
+
+
 def generate_qa_for_node(node: dict, model: str = MODEL) -> list[dict]:
-    """Generate 3-5 Q&A pairs for one tree node's text in financial-analyst voice."""
-    prompt = QA_GEN_PROMPT.format(title=node["title"], text=node["text"][:12000])
+    """Generate Q&A pairs for one tree node's text in financial-analyst voice. Pair count
+    scales with section length (see target_pair_count)."""
+    n_pairs = target_pair_count(node["text"])
+    prompt = QA_GEN_PROMPT.format(title=node["title"], text=node["text"][:12000], n_pairs=n_pairs)
 
     response = client.chat.completions.create(
         model=model,
