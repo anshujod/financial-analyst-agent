@@ -5,3 +5,4 @@ data/*.pdf
 __pycache__/
 adapter/
 *.zip
+.DS_Store
