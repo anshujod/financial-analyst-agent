@@ -1,10 +1,13 @@
 import json
+import math
 from pathlib import Path
 
 from config import client
 
 ROOT = Path(__file__).resolve().parent.parent
 MODEL = "openai/gpt-4o-mini"
+CHUNK_SIZE = 12000
+MAX_CHUNKS_PER_SECTION = 3
 
 QA_GEN_PROMPT = """You are generating fine-tuning data for a financial analyst assistant. Given
 the text of one section of a 10-K filing, write {n_pairs} question/answer pairs that a financial
@@ -59,11 +62,28 @@ def target_pair_count(text: str) -> int:
     return 16
 
 
-def generate_qa_for_node(node: dict, model: str = MODEL) -> list[dict]:
-    """Generate Q&A pairs for one tree node's text in financial-analyst voice. Pair count
-    scales with section length (see target_pair_count)."""
-    n_pairs = target_pair_count(node["text"])
-    prompt = QA_GEN_PROMPT.format(title=node["title"], text=node["text"][:12000], n_pairs=n_pairs)
+def get_chunks(text: str, chunk_size: int = CHUNK_SIZE, max_chunks: int = MAX_CHUNKS_PER_SECTION) -> list[str]:
+    """Split text into up to max_chunks windows of chunk_size, spread evenly across the full
+    length (beginning/middle/end) rather than always taking the first chunk_size characters.
+
+    Generating many Q&A pairs from the same fixed slice of a long section (e.g. always
+    text[:12000]) teaches the model many different question->answer mappings from nearly
+    identical input, which risks the model conflating answers across questions at inference
+    time instead of staying grounded in the specific excerpt for the specific question."""
+    total_possible = math.ceil(len(text) / chunk_size)
+    if total_possible <= 1:
+        return [text]
+
+    if total_possible <= max_chunks:
+        indices = list(range(total_possible))
+    else:
+        indices = sorted({round(i * (total_possible - 1) / (max_chunks - 1)) for i in range(max_chunks)})
+
+    return [text[i * chunk_size:(i + 1) * chunk_size] for i in indices]
+
+
+def generate_qa_for_chunk(node: dict, chunk_text: str, n_pairs: int, model: str = MODEL) -> list[dict]:
+    prompt = QA_GEN_PROMPT.format(title=node["title"], text=chunk_text, n_pairs=n_pairs)
 
     response = client.chat.completions.create(
         model=model,
@@ -75,13 +95,33 @@ def generate_qa_for_node(node: dict, model: str = MODEL) -> list[dict]:
     return [
         {
             "question": pair["question"],
-            "context": node["text"],
+            "context": chunk_text,
             "answer": pair["answer"],
             "node_id": node["node_id"],
             "node_title": node["title"],
         }
         for pair in result["qa_pairs"]
     ]
+
+
+def generate_qa_for_node(node: dict, model: str = MODEL) -> list[dict]:
+    """Generate Q&A pairs for one tree node's text in financial-analyst voice. Total pair
+    count scales with section length (see target_pair_count); for sections longer than
+    CHUNK_SIZE, that budget is split across multiple non-overlapping chunks spread across
+    the section so training pairs are grounded in diverse excerpts, not just the opening."""
+    total_pairs = target_pair_count(node["text"])
+    chunks = get_chunks(node["text"])
+
+    base_share, remainder = divmod(total_pairs, len(chunks))
+    per_chunk_counts = [base_share + (1 if i < remainder else 0) for i in range(len(chunks))]
+
+    all_pairs = []
+    for chunk_text, n_pairs in zip(chunks, per_chunk_counts):
+        if n_pairs == 0:
+            continue
+        all_pairs.extend(generate_qa_for_chunk(node, chunk_text, n_pairs, model=model))
+
+    return all_pairs
 
 
 def main():
