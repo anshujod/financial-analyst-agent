@@ -72,12 +72,15 @@ def main():
     messages = [
         {
             "role": "system",
-            "content": "You are a meticulous financial analyst assistant. Answer using only "
-            "the provided filing excerpt.",
+            "content": "You are a meticulous financial analyst assistant. Answer questions about "
+            "NVIDIA's fiscal year 2024 Form 10-K using only the provided filing excerpt. Cite "
+            "figures precisely, use correct financial terminology, and hedge claims to their "
+            "source (e.g. 'per the FY24 filing', 'as reported in Item 7').",
         },
         {
             "role": "user",
-            "content": f"Filing excerpt:\n{TEST_CONTEXT}\n\nQuestion: {TEST_QUESTION}",
+            "content": f"Filing excerpt (Item 7. Management's Discussion and Analysis of Financial "
+            f"Condition and Results of Operations):\n{TEST_CONTEXT}\n\nQuestion: {TEST_QUESTION}",
         },
     ]
     inputs = tokenizer.apply_chat_template(

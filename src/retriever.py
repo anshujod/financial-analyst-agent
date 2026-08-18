@@ -27,7 +27,7 @@ Respond ONLY with JSON in this exact format, copying node ids exactly as they ap
 
 
 def load_nodes(path: Path = TREE_PATH) -> list[dict]:
-    return json.loads(path.read_text())
+    return [n for n in json.loads(path.read_text()) if not n.get("skip_qa")]
 
 
 def tree_search(question: str, nodes: list[dict], model: str = MODEL) -> dict:

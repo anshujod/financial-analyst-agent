@@ -9,7 +9,9 @@ TRAIN_PATH = ROOT / "data" / "train.jsonl"
 EVAL_PATH = ROOT / "data" / "eval.jsonl"
 
 EVAL_FRACTION = 0.15
-CONTEXT_CHAR_LIMIT = 12000  # matches the slice actually shown to the LLM during QA generation
+# Keep prompts comfortably under the notebook's max_length=4096 (measured ~2.9k tokens
+# for 10k chars + system prompt + chat template). Excerpts longer than this get cut.
+CONTEXT_CHAR_LIMIT = 10000
 
 SYSTEM_PROMPT = (
     "You are a meticulous financial analyst assistant. Answer questions about NVIDIA's "
@@ -35,27 +37,62 @@ def to_chat_format(pair: dict) -> dict:
         ],
         "node_id": pair["node_id"],
         "node_title": pair["node_title"],
+        "context": context,
     }
 
 
-def stratified_split(rows: list[dict], eval_fraction: float, seed: int = 42) -> tuple[list[dict], list[dict]]:
-    """Split ~eval_fraction of each section's rows into eval, keeping the rest in train.
-    Sections with only one row go entirely to train (a single example can't be split)."""
+def excerpt_split(rows: list[dict], eval_fraction: float, seed: int = 42) -> tuple[list[dict], list[dict]]:
+    """Split by *excerpt* (the retrieved context text), not by section, holding out
+    entire excerpts for eval. Questions derived from the same excerpt must not appear
+    in both train and eval — otherwise the eval measures memorization of seen text
+    rather than grounding on unseen excerpts (what the agent actually faces at
+    inference, when the retriever returns passages the model never saw)."""
     rng = random.Random(seed)
-    by_section = defaultdict(list)
+    by_excerpt = defaultdict(list)
     for row in rows:
-        by_section[row["node_id"]].append(row)
+        by_excerpt[row["context"]].append(row)
 
-    train, eval_ = [], []
-    for section_rows in by_section.values():
-        rng.shuffle(section_rows)
-        n_eval = round(len(section_rows) * eval_fraction) if len(section_rows) >= 2 else 0
-        eval_.extend(section_rows[:n_eval])
-        train.extend(section_rows[n_eval:])
+    excerpts = list(by_excerpt)
+    rng.shuffle(excerpts)
 
+    n_eval_rows = round(len(rows) * eval_fraction)
+    eval_excerpts: set[str] = set()
+    eval_rows = 0
+    for ex in excerpts:
+        if eval_rows >= n_eval_rows:
+            break
+        eval_excerpts.add(ex)
+        eval_rows += len(by_excerpt[ex])
+
+    train = [r for ex, rs in by_excerpt.items() if ex not in eval_excerpts for r in rs]
+    eval_ = [r for ex in eval_excerpts for r in by_excerpt[ex]]
     rng.shuffle(train)
     rng.shuffle(eval_)
     return train, eval_
+
+
+def check_truncation(rows: list[dict], max_tokens: int = 4096) -> None:
+    """Warn if any formatted row would be truncated at the notebook's max_length.
+    Requires the Qwen tokenizer; skipped if transformers isn't available."""
+    try:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(ROOT / "adapter")
+    except Exception:
+        print(f"[check_truncation] tokenizer unavailable — skipping (run with the venv that has transformers)")
+        return
+
+    over = []
+    for i, row in enumerate(rows):
+        text = tok.apply_chat_template(row["messages"], tokenize=False, add_generation_prompt=False)
+        n = len(tok(text, truncation=True, max_length=max_tokens)["input_ids"])
+        if n >= max_tokens:
+            over.append((i, n))
+    if over:
+        print(f"[check_truncation] WARNING: {len(over)}/{len(rows)} rows hit max_length={max_tokens} "
+              f"(e.g. row {over[0][0]} = {over[0][1]} tokens). Raise max_length or shrink CONTEXT_CHAR_LIMIT.")
+    else:
+        print(f"[check_truncation] OK: all {len(rows)} rows fit under {max_tokens} tokens")
 
 
 def write_jsonl(rows: list[dict], path: Path) -> None:
@@ -68,18 +105,20 @@ def main():
     pairs = load_pairs(INPUT_PATH)
     formatted = [to_chat_format(p) for p in pairs]
 
-    train, eval_ = stratified_split(formatted, EVAL_FRACTION)
-    write_jsonl(train, TRAIN_PATH)
-    write_jsonl(eval_, EVAL_PATH)
+    train, eval_ = excerpt_split(formatted, EVAL_FRACTION)
 
-    train_sections = {r["node_id"] for r in train}
-    eval_sections = {r["node_id"] for r in eval_}
-    both = train_sections & eval_sections
-
+    train_excerpts = {r["context"] for r in train}
+    leaked = sum(1 for r in eval_ if r["context"] in train_excerpts)
     print(f"Total examples: {len(formatted)}")
     print(f"Train: {len(train)} ({TRAIN_PATH})")
     print(f"Eval:  {len(eval_)} ({EVAL_PATH})")
-    print(f"Sections represented in both splits: {len(both)}/{len(train_sections | eval_sections)}")
+    print(f"Eval rows sharing an excerpt with train (must be 0): {leaked}")
+
+    write_jsonl(train, TRAIN_PATH)
+    write_jsonl(eval_, EVAL_PATH)
+
+    check_truncation(train)
+    check_truncation(eval_)
 
     print("\n--- 3 example formatted rows ---")
     for row in train[:3]:

@@ -6,8 +6,10 @@ from config import client
 
 ROOT = Path(__file__).resolve().parent.parent
 MODEL = "openai/gpt-4o-mini"
-CHUNK_SIZE = 12000
-MAX_CHUNKS_PER_SECTION = 3
+# Matches format_dataset.CONTEXT_CHAR_LIMIT so no excerpt is ever silently truncated
+# when the dataset is formatted (longer chunks would all collapse to the same prefix).
+CHUNK_SIZE = 10000
+MAX_CHUNKS_PER_SECTION = 4
 
 QA_GEN_PROMPT = """You are generating fine-tuning data for a financial analyst assistant. Given
 the text of one section of a 10-K filing, write {n_pairs} question/answer pairs that a financial
@@ -54,12 +56,12 @@ def target_pair_count(text: str) -> int:
     while long, information-dense sections (Risk Factors, Item 15) can yield more."""
     length = len(text)
     if length < 2000:
-        return 4
+        return 6
     if length < 6000:
-        return 7
+        return 12
     if length < 20000:
-        return 10
-    return 16
+        return 18
+    return 28
 
 
 def get_chunks(text: str, chunk_size: int = CHUNK_SIZE, max_chunks: int = MAX_CHUNKS_PER_SECTION) -> list[str]:
@@ -108,7 +110,14 @@ def generate_qa_for_node(node: dict, model: str = MODEL) -> list[dict]:
     """Generate Q&A pairs for one tree node's text in financial-analyst voice. Total pair
     count scales with section length (see target_pair_count); for sections longer than
     CHUNK_SIZE, that budget is split across multiple non-overlapping chunks spread across
-    the section so training pairs are grounded in diverse excerpts, not just the opening."""
+    the section so training pairs are grounded in diverse excerpts, not just the opening.
+
+    Nodes flagged skip_qa (content-less placeholders: 'None', 'Not applicable.',
+    '[Reserved]', proxy-statement pointers) and nodes with no text produce no pairs —
+    generating from them teaches the model to hallucinate answers the excerpt cannot
+    support."""
+    if node.get("skip_qa") or not (node.get("text") or "").strip():
+        return []
     total_pairs = target_pair_count(node["text"])
     chunks = get_chunks(node["text"])
 
